@@ -1,7 +1,9 @@
 from __future__ import division
 import sys
-
+import time
+import struct
 import serial
+
 
 class TSL550:
     # continuous, two-way, external trigger, constant frequency interval
@@ -28,7 +30,12 @@ class TSL550:
     SWEEP_TRIGGER_WAIT = 3
     SWEEP_JUMP = 4
 
-    def __init__(self, address, baudrate=9600, terminator="\r"):
+    MINIMUM_WAVELENGTH = 1500
+    MAXIMUM_WAVELENGTH = 1630
+
+    LASER_PORT = "COM4"  # Change based on specific connection settings.
+
+    def __init__(self, address=LASER_PORT, baudrate=9600, terminator="\r"):
         """
         Connect to the TSL550. Address is the serial port, baudrate
         can be set on the device, terminator is the string the marks
@@ -36,14 +43,17 @@ class TSL550:
         """
 
         self.device = serial.Serial(address, baudrate=baudrate, timeout=0)
+        self.device.flushInput()
+        self.device.flushOutput()
 
         if sys.version_info.major >= 3: # Python 3 compatibility: convert to bytes
             terminator = terminator.encode("ASCII")
         self.terminator = terminator
 
-        # Make sure the laser is off
-        self.is_on = False
-        self.off()
+        # Make sure the shutter is on
+        #self.is_on = True
+        print(self.write("SU"))
+        shutter = self.closeShutter()
 
         # Set power management to auto
         self.power_control = "auto"
@@ -63,16 +73,17 @@ class TSL550:
 
         # Write the command
         self.device.write(command + self.terminator)
+        time.sleep(0.05)
 
         # Read response
-        response = ""
-        in_byte = self.device.read()
+        response     = ""
+        in_byte     = self.device.read()
+
         while in_byte != self.terminator:
             if sys.version_info.major >= 3:
                 response += in_byte.decode("ASCII")
             else:
                 response += in_byte
-
             in_byte = self.device.read()
 
         return response
@@ -447,3 +458,113 @@ class TSL550:
 
     def sweep_end_frequency(self, val=None):
         return self._set_var("FF", 5, val)
+
+    def openShutter(self):
+        """Opens the laser's shutter."""
+        return self.write("SO")
+
+    def closeShutter(self):
+        """Opens the laser's shutter."""
+        return self.write("SC")
+
+    def trigger_enable_output(self):
+        """
+        Enables the output trigger signal.
+        """
+        self.write("TRE")
+
+    def trigger_disable_output(self):
+        """
+        Disables the output trigger signal.
+        """
+        self.write("TRD")
+
+    def trigger_get_mode(self):
+        current_state = self.write("TM")
+        if current_state == 1:
+            return "Stop"
+        elif current_state == 2:
+            return "Start"
+        elif current_state == 3:
+            return "Step"
+
+    def trigger_set_mode(self,val=None):
+        mode = 0
+        if val == "None" or val == None:
+            mode = 0
+        elif val == "Stop":
+            mode = 1
+        elif val == "Start":
+            mode = 2
+        elif val == "Step":
+            mode = 3
+        else:
+            raise ValueError("Invalide output trigger mode supplied. Choose from None, Stop, Start, and Step.")
+        current_state = int(self.write("TM{}".format(mode)))
+        if current_state == 1:
+            return "Stop"
+        elif current_state == 2:
+            return "Start"
+        elif current_state == 3:
+            return "Step"
+
+    def trigger_set_step(self,step):
+        return self._set_var("TW", 4, val=step)
+
+
+    def wavelength_logging_number(self):
+        """
+        Returns the number of wavelength points stored in the wavelength
+        logging feature.
+        """
+        return self.write("TN")
+
+    def wavelength_logging(self):
+        """
+        Creates a list of all the wavelength points logged into the laser's
+        buffer. Assumes that all the correct sweep and triggering protocol
+        are met (see manual page 6-5).
+        """
+        # stop laser from outputting
+        self.write("SU")
+
+        # First, get the number of wavelength points
+        num_points = self.wavelength_logging_number()
+
+        # Preallocate arrays
+        wavelength_points = []
+
+        # Now petition the laser for the wavelength points
+        command = "TA"
+        if sys.version_info.major >= 3:
+            command = command.encode("ASCII")
+        self.device.write(command + self.terminator)
+        time.sleep(0.1)
+
+        # Iterate through wavelength points
+        for nWave in range(int(num_points)):
+            while True:
+                try:
+                    in_byte = self.device.read(4)
+                    current_wavelength = float(struct.unpack(">I", in_byte)[0]) / 1e4
+                    break
+                except:
+                    print('Failed to read in wavelength data.')
+                    pass
+
+            wavelength_points.append(current_wavelength)
+
+        # stop laser from outputting
+        self.write("SU")
+        return wavelength_points
+
+    def print_status(self):
+        """
+        Query the status of the laser and print its results.
+        """
+        status = self.write("SU")
+
+        # Check if LD is on
+        self.is_on = True if int(status) < 0 else False
+
+        return status
